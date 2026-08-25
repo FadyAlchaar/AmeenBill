@@ -12,7 +12,7 @@ echo json_encode([
         "company" => "LIO",
         "version" => "4.2.0",
 
-        "start_page" => "/dashboard.php",
+        "start_page" => "/dashboard_full.php",
     ],
 
     "branding" => [
