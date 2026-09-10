@@ -1098,7 +1098,7 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         div.innerHTML = `
             <div class="bill-title">
                 <span class="bill-number">#${bill.Number}</span>
-                <span class="bill-customer">${escapeHtml(bill.Cust_Name || 'بدون اسم')}</span>
+                <span class="bill-customer">${escapeHtml(bill.Cust_Name || 'مناقلة')}</span>
             </div>
             <div class="bill-meta">
                 <span>💰 ${escapeHtml(bill.CurrencyName || '-')}</span>

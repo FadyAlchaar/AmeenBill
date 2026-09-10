@@ -1,7 +1,7 @@
 <?php
 // config.php
 define('DB_SERVER', 'localhost\SQLEXPRESS'); // or just 'localhost'
-define('DB_NAME', 'TESTDB');
+define('DB_NAME', 'AmnDb006');
 define('DB_USER', 'sa');
 define('DB_PASS', 'P@ssw0rd');
 
