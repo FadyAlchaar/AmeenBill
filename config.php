@@ -10,7 +10,7 @@ if (APP_ENV === 'prod') {
 } else {
     // Local XAMPP + SQL Express
     define('DB_SERVER', 'localhost\SQLEXPRESS');
-    define('DB_NAME',   'AmnDb006');
+    define('DB_NAME',   'AlbassaDB2026');
     define('DB_USER',   'alameenbill_reader');
     define('DB_PASS',   'P@ssw0rd@2026');
 }
