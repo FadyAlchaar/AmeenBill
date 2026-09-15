@@ -1,8 +1,9 @@
 <?php
 // dashboard_full.php - with draggable splitter between bills and details
-error_reporting(E_ALL);
-ini_set('display_errors', 0);
+/* error_reporting(E_ALL);
+ini_set('display_errors', 0); */
 require_once 'config.php';
+
 
 // AJAX handler to populate filter dropdowns (Customer, Salesman)
 if (isset($_GET['filters']) && $_GET['filters'] == 1) {
