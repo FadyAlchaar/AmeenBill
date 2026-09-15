@@ -192,16 +192,18 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
 
         // Header totals so the UI can show the authoritative figures
         $hdrSql = "SELECT
+                       b.GUID,
                        b.Number,
                        b.Cust_Name,
                        b.Date,
+                       b.PayType,
                        b.Total,
                        b.TotalDisc,
                        b.TotalExtra,
                        b.ItemsDisc,
                        b.BonusDisc,
                        b.VAT,
-                       b.PayType,
+                       b.CreateDate,
                        cur.Name AS CurrencyName,
                        s.Name   AS StoreName,
                        cc.Name  AS CostCenterName
@@ -709,6 +711,107 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         .bill-meta .meta-disc  { background: #fef2f2; color: var(--danger); }
         .bill-meta .meta-extra { background: #fffbeb; color: #b45309; }
 
+        /* "Updated" pill that flashes in the details header on refresh */
+        .details-header { position: relative; }
+        .update-pill {
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%) translateX(10px);
+            background: rgba(255,255,255,0.15);
+            color: white;
+            font-size: 0.7rem;
+            font-weight: 700;
+            padding: 3px 10px;
+            border-radius: 999px;
+            opacity: 0;
+            transition: opacity 0.25s, transform 0.25s;
+            pointer-events: none;
+        }
+        .update-pill.show {
+            opacity: 1;
+            transform: translateY(-50%) translateX(0);
+        }
+
+        /* Amber glow when a bill card's data was just updated */
+        .bill-card.card-updated {
+            animation: cardUpdated 1.5s ease-out;
+        }
+
+        /* Mismatch warning on the summary bar */
+        .ds-warn {
+            background: #fef3c7;
+            color: #92400e;
+            border-color: #fde68a;
+        }
+        .details-summary.has-mismatch {
+            background: #fffbeb;
+            border-bottom-color: #fde68a;
+        }
+
+        /* Explanatory banner when header doesn't match items */
+        .mismatch-banner {
+            background: #fffbeb;
+            border: 1px solid #fde68a;
+            color: #92400e;
+            padding: 10px 14px;
+            margin: 10px 14px 0;
+            border-radius: 10px;
+            font-size: 0.78rem;
+            line-height: 1.6;
+            text-align: right;
+        }
+        .mismatch-banner .mismatch-hint {
+            color: #a16207;
+            font-size: 0.72rem;
+        }
+
+        /* Sound / notification toggle button */
+        .sound-toggle-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-sm);
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 700;
+            color: var(--text-muted);
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .sound-toggle-btn:hover {
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+        .sound-toggle-btn.enabled {
+            background: #ecfdf5;
+            border-color: #a7f3d0;
+            color: #047857;
+        }
+        .sound-toggle-btn .sound-toggle-label {
+            font-size: 0.72rem;
+        }
+        @media (max-width: 600px) {
+            .sound-toggle-btn .sound-toggle-label { display: none; }
+            .sound-toggle-btn { padding: 6px 9px; }
+        }
+
+        @keyframes cardUpdated {
+            0%   { background: #fef3c7; }
+            100% { background: var(--surface); }
+        }
+        .bill-card.active.card-updated {
+            animation: cardUpdatedActive 1.5s ease-out;
+        }
+        @keyframes cardUpdatedActive {
+            0%   { background: #fef3c7; }
+            100% { background: var(--primary-light); }
+        }
+
         /* ---------- Responsive ---------- */
         @media (max-width: 900px) {
             body { padding: 10px; }
@@ -762,6 +865,10 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         <h1>📊 لوحة المبيعات</h1>
         <div class="topbar-right">
             <div class="live-badge"><span class="live-dot"></span> تحديث مباشر</div>
+            <button type="button" class="sound-toggle-btn" id="soundToggleBtn" title="تنبيه صوتي عند وصول فاتورة جديدة">
+                <span id="soundToggleIcon">🔔</span>
+                <span class="sound-toggle-label" id="soundToggleLabel">صامت</span>
+            </button>
             <button type="button" class="filters-toggle-btn" id="filtersToggleBtn">
                 ☰ الفلاتر <span class="filters-toggle-badge" id="filtersToggleBadge"></span>
             </button>
@@ -1060,17 +1167,30 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         activeFilters.customer = customerSelect.getValue();
         activeFilters.salesman = salesmanSelect.getValue();
         activeFilters.dateFrom = document.getElementById('filterDateFrom').value;
-        activeFilters.dateTo = document.getElementById('filterDateTo').value;
+        activeFilters.dateTo   = document.getElementById('filterDateTo').value;
 
         updateFiltersToggleBadge();
 
-        // Reset pagination/state and reload fresh
-        lastMaxDate = null;
+        // Reset state and reload from scratch
+        lastMaxDate   = null;
         displayed.clear();
+        resetNotifySuppression();   // ← add this line
         loadMoreOffset = 1;
         hasMore = true;
         document.getElementById('bills').innerHTML = 'جاري التحميل...';
-        loadBills(false);
+
+        // Stop whatever live mechanism is running
+        stopSSE();
+        if (pollFallbackTimer) {
+            clearInterval(pollFallbackTimer);
+            pollFallbackTimer = null;
+        }
+
+        // Reload, then restart SSE with the new filter set
+        (async () => {
+            await loadBills(false);
+            startSSE();
+        })();
     }
 
     function updateFiltersToggleBadge() {
@@ -1129,6 +1249,257 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
     });
 
     loadFilterOptions();
+
+    // ---------- SSE (live updates) ----------
+    let sseConnection    = null;
+    let sseErrorCount    = 0;
+    let pollFallbackTimer = null;
+    const SSE_MAX_ERRORS = 5;
+
+    function stopSSE() {
+        if (sseConnection) {
+            sseConnection.close();
+            sseConnection = null;
+        }
+    }
+
+    function startSSE() {
+        stopSSE();
+        sseErrorCount = 0;
+
+        let url = 'sse_bills.php';
+        const params = [];
+        if (lastMaxDate) params.push('lastDate='  + encodeURIComponent(lastMaxDate));
+        if (activeFilters.customer) params.push('customer=' + encodeURIComponent(activeFilters.customer));
+        if (activeFilters.salesman) params.push('salesman=' + encodeURIComponent(activeFilters.salesman));
+        if (activeFilters.dateFrom) params.push('dateFrom=' + encodeURIComponent(activeFilters.dateFrom));
+        if (activeFilters.dateTo)   params.push('dateTo='   + encodeURIComponent(activeFilters.dateTo));
+        if (params.length) url += '?' + params.join('&');
+
+        try {
+            sseConnection = new EventSource(url);
+        } catch (e) {
+            console.warn('SSE unavailable, using polling fallback:', e);
+            startPollingFallback();
+            return;
+        }
+
+        sseConnection.addEventListener('open', () => {
+            sseErrorCount = 0;
+            setLiveIndicator('live');
+        });
+
+        sseConnection.addEventListener('bills', (e) => {
+            sseErrorCount = 0;
+            let bills;
+            try { bills = JSON.parse(e.data); } catch (err) { return; }
+            if (!Array.isArray(bills) || !bills.length) return;
+
+            let newMax = lastMaxDate;
+            for (const bill of bills) {
+                if (bill.CreateDate > newMax) newMax = bill.CreateDate;
+                if (!displayed.has(bill.GUID)) {
+                    displayed.set(bill.GUID, bill);
+                    addBillCard(bill, true);
+                }
+            }
+            if (newMax) lastMaxDate = newMax;
+            updateBillCount();
+
+            // Fire the sound + notification for genuinely new bills only
+            if (actuallyNew.length) notifyNewBills(actuallyNew);
+        });
+
+        sseConnection.addEventListener('error', () => {
+            sseErrorCount++;
+            if (sseErrorCount >= SSE_MAX_ERRORS) {
+                console.warn('SSE failed ' + SSE_MAX_ERRORS + ' times, switching to polling');
+                setLiveIndicator('fallback');
+                stopSSE();
+                startPollingFallback();
+            } else {
+                // EventSource will auto-reconnect; recreate with an updated lastMaxDate
+                stopSSE();
+                setTimeout(startSSE, 2000);
+            }
+        });
+    }
+
+    function startPollingFallback() {
+        if (pollFallbackTimer) return;
+        pollFallbackTimer = setInterval(() => loadBills(false), 5000);
+    }
+
+    function setLiveIndicator(state) {
+        const badge = document.querySelector('.live-badge');
+        const dot   = document.querySelector('.live-dot');
+        if (!badge || !dot) return;
+
+        if (state === 'live') {
+            dot.style.background = '#10b981';   // green
+            badge.lastChild.textContent = ' تحديث مباشر (SSE)';
+        } else if (state === 'fallback') {
+            dot.style.background = '#f59e0b';   // amber
+            badge.lastChild.textContent = ' تحديث كل 5 ثوانٍ';
+        } else if (state === 'down') {
+            dot.style.background = '#ef4444';   // red
+            badge.lastChild.textContent = ' قطع الاتصال';
+        }
+    }
+
+    // ---------- Sound + desktop notifications ----------
+    const SOUND_ENABLED_KEY = 'dashboardSoundEnabled';
+
+    let soundEnabled   = false;   // will be restored from localStorage
+    let audioContext   = null;
+
+    // Restore user preference
+    try {
+        soundEnabled = localStorage.getItem(SOUND_ENABLED_KEY) === '1';
+    } catch (e) { /* ignore */ }
+
+    const soundBtn   = document.getElementById('soundToggleBtn');
+    const soundIcon  = document.getElementById('soundToggleIcon');
+    const soundLabel = document.getElementById('soundToggleLabel');
+
+    function updateSoundButton() {
+        if (!soundBtn) return;
+        soundBtn.classList.toggle('enabled', soundEnabled);
+        soundIcon.textContent  = soundEnabled ? '🔔' : '🔕';
+        soundLabel.textContent = soundEnabled ? 'التنبيهات مفعلة' : 'صامت';
+        soundBtn.title = soundEnabled
+            ? 'التنبيهات مفعلة — اضغط للكتم'
+            : 'التنبيهات صامتة — اضغط للتفعيل';
+    }
+
+    // Initialize button state
+    updateSoundButton();
+
+    // ─── Audio unlock + beep ────────────────────────────────────────
+    function ensureAudioContext() {
+        if (audioContext) return audioContext;
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        try {
+            audioContext = new Ctx();
+        } catch (e) {
+            audioContext = null;
+        }
+        return audioContext;
+    }
+
+    // Two quick ascending notes: pleasant, distinct, not jarring
+    function playNewBillChime() {
+        const ctx = ensureAudioContext();
+        if (!ctx) return;
+        if (ctx.state === 'suspended') ctx.resume();
+
+        const now = ctx.currentTime;
+        const notes = [
+            { freq: 880,  start: 0,     dur: 0.12 },   // A5
+            { freq: 1175, start: 0.13,  dur: 0.18 }    // D6
+        ];
+
+        notes.forEach(n => {
+            const osc  = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = n.freq;
+
+            // Gentle envelope to avoid clicks
+            gain.gain.setValueAtTime(0, now + n.start);
+            gain.gain.linearRampToValueAtTime(0.18, now + n.start + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur);
+
+            osc.connect(gain).connect(ctx.destination);
+            osc.start(now + n.start);
+            osc.stop(now + n.start + n.dur + 0.05);
+        });
+    }
+
+    // ─── Desktop notification ──────────────────────────────────────
+    async function requestNotificationPermission() {
+        if (!('Notification' in window)) return false;
+        if (Notification.permission === 'granted') return true;
+        if (Notification.permission === 'denied')  return false;
+
+        const result = await Notification.requestPermission();
+        return result === 'granted';
+    }
+
+    function showDesktopNotification(bill, netAmount) {
+        if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+        const title = `فاتورة جديدة #${bill.Number}`;
+        const body  = `${bill.Cust_Name || 'مناقلة'} — ${fmtNum(netAmount)} ${bill.CurrencyName || ''}`;
+
+        try {
+            const n = new Notification(title, {
+                body,
+                tag: bill.GUID,           // dedupe: same GUID replaces an older notification
+                silent: true,             // we play our own chime, no OS beep
+                requireInteraction: false
+            });
+            // Auto-close after 6 seconds
+            setTimeout(() => n.close(), 6000);
+        } catch (e) {
+            // Some browsers throw when page isn't focused; ignore silently
+        }
+    }
+
+    // ─── Toggle handler ────────────────────────────────────────────
+    if (soundBtn) {
+        soundBtn.addEventListener('click', async () => {
+            soundEnabled = !soundEnabled;
+
+            if (soundEnabled) {
+                // This click is the user interaction that unlocks audio
+                const ctx = ensureAudioContext();
+                if (ctx && ctx.state === 'suspended') ctx.resume();
+
+                // Test chime so the user immediately hears it working
+                playNewBillChime();
+
+                // Ask for desktop-notification permission too
+                await requestNotificationPermission();
+            }
+
+            try { localStorage.setItem(SOUND_ENABLED_KEY, soundEnabled ? '1' : '0'); } catch (e) {}
+            updateSoundButton();
+        });
+    }
+
+    // ─── Main entry point — call this from the SSE handler ─────────
+    let _suppressNextChime = true;   // true on first load to avoid chiming for old bills
+
+    function notifyNewBills(bills) {
+        if (!Array.isArray(bills) || bills.length === 0) return;
+
+        // On the very first call after page load / filter change,
+        // the SSE stream may deliver a burst of historical bills — skip those.
+        if (_suppressNextChime) {
+            _suppressNextChime = false;
+            return;
+        }
+
+        if (!soundEnabled) return;
+
+        // Play the chime only once per batch, even if 3 bills arrived together
+        playNewBillChime();
+
+        // But show a desktop notification for the newest one only
+        // (a stack of 10 notifications is annoying)
+        const newest = bills[bills.length - 1];
+        const num = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+        const net = num(newest.Total) - num(newest.TotalDisc) + num(newest.TotalExtra);
+        showDesktopNotification(newest, net);
+    }
+
+    // Reset the suppression flag whenever the bill list is reset
+    // (page load, filter change, SSE reconnect)
+    function resetNotifySuppression() {
+        _suppressNextChime = true;
+    }
 
     // ---------- Dashboard functionality (unchanged from last working version) ----------
     let lastMaxDate = null;
@@ -1227,12 +1598,12 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
             <div class="bill-title">
                 <span class="bill-number">#${bill.Number}</span>
                 <span class="bill-customer">${escapeHtml(bill.Cust_Name || 'مناقلة')}</span>
-                <span class="bill-net">${net.toFixed(2)} ${escapeHtml(bill.CurrencyName || '')}</span>
+                <span class="bill-net">${fmtNum(net)} ${escapeHtml(bill.CurrencyName || '')}</span>
             </div>
             <div class="bill-meta">
-                <span>💰 إجمالي: ${total.toFixed(2)}</span>
-                ${disc ? `<span class="meta-disc">➖ خصم: ${disc.toFixed(2)}</span>` : ''}
-                ${extra ? `<span class="meta-extra">➕ إضافي: ${extra.toFixed(2)}</span>` : ''}
+                <span>💰 إجمالي: ${fmtNum(total)}</span>
+                ${disc ? `<span class="meta-disc">➖ خصم: ${fmtNum(disc)}</span>` : ''}
+                ${extra ? `<span class="meta-extra">➕ إضافي: ${fmtNum(extra)}</span>` : ''}
                 <span>💳 ${payTypeLabel(bill.PayType)}</span>
                 <span>🏬 ${escapeHtml(bill.StoreName || '-')}</span>
                 <span>📊 ${escapeHtml(bill.CostCenterName || '-')}</span>
@@ -1243,104 +1614,245 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         div.onclick = () => showDetails(bill.GUID, div);
         const container = document.getElementById('bills');
         if (prependFlag && container.firstChild) {
+            const nearTop = container.scrollTop < 50;
+            const oldHeight = container.scrollHeight;
             container.insertBefore(div, container.firstChild);
+            if (!nearTop) {
+                // Keep the user visually where they were
+                container.scrollTop += (container.scrollHeight - oldHeight);
+            }
         } else {
             container.appendChild(div);
         }
     }
 
+    let activeBillGuid = null;
+    let lastDetailsSignature = '';
+
     async function showDetails(guid, element) {
         document.querySelectorAll('.bill-card').forEach(c => c.classList.remove('active'));
         element.classList.add('active');
+
+        activeBillGuid = guid;
+        lastDetailsSignature = '';   // force the next render
 
         const detailsDiv = document.getElementById('detailsContainer');
         detailsDiv.innerHTML = '<div class="loading">جاري تحميل التفاصيل...</div>';
 
         try {
-            let resp = await fetch(`?details=1&guid=${guid}`);
-            let data = await resp.json();
+            const resp = await fetch(`?details=1&guid=${guid}`);
+            const data = await resp.json();
             if (data.error) throw new Error(data.error);
 
-            const items  = Array.isArray(data.items) ? data.items : [];
-            const hdr    = data.header || null;
+            // Guard: user clicked another bill while this was in flight
+            if (activeBillGuid !== guid) return;
 
-            if (!items.length) {
-                detailsDiv.innerHTML = '<div class="loading">لا توجد أصناف في هذه الفاتورة.</div>';
-                return;
-            }
-
-            const num = v => {
-                const n = parseFloat(v);
-                return isFinite(n) ? n : 0;
-            };
-            const fmt = v => num(v).toFixed(2);
-
-            let sumTotal = 0, sumDisc = 0, sumExtra = 0, sumNet = 0;
-
-            let html = '<table><thead><tr>';
-            html += '<th>#</th><th>اسم الصنف</th><th>الكمية</th><th>الوحدة</th>'
-                + '<th>سعر الوحدة</th><th>الإجمالي</th><th>الخصم</th><th>إضافي</th><th>الصافي</th>';
-            html += '</tr></thead><tbody>';
-
-            items.forEach((row, i) => {
-                const total = num(row.Total);
-                const disc  = num(row.DiscountValue);
-                const extra = num(row.Extra);
-                const net   = num(row.Net);
-                sumTotal += total;
-                sumDisc  += disc;
-                sumExtra += extra;
-                sumNet   += net;
-
-                html += `<tr>
-                    <td>${i + 1}</td>
-                    <td>${escapeHtml(row.ItemName)}</td>
-                    <td>${fmt(row.Qty)}</td>
-                    <td>${escapeHtml(row.Unit) || '-'}</td>
-                    <td>${fmt(row.UnitPrice)}</td>
-                    <td>${fmt(total)}</td>
-                    <td>${fmt(disc)}</td>
-                    <td>${fmt(extra)}</td>
-                    <td>${fmt(net)}</td>
-                </tr>`;
-            });
-
-            html += '</tbody><tfoot><tr class="totals-row">';
-            html += '<td colspan="2">الإجمالي</td>';
-            html += '<td></td><td></td><td></td>';
-            html += `<td>${sumTotal.toFixed(2)}</td>`;
-            html += `<td>${sumDisc.toFixed(2)}</td>`;
-            html += `<td>${sumExtra.toFixed(2)}</td>`;
-            html += `<td>${sumNet.toFixed(2)}</td>`;
-            html += '</tr></tfoot></table>';
-
-            // Header summary bar (authoritative totals from bu000)
-            if (hdr) {
-                const gt   = num(hdr.Total);
-                const gd   = num(hdr.TotalDisc);
-                const ge   = num(hdr.TotalExtra);
-                const gvat = num(hdr.VAT);
-                const grand = gt - gd + ge;
-
-                const summary = `
-                    <div class="details-summary">
-                        <span class="ds-chip ds-num">فاتورة #${escapeHtml(hdr.Number)}</span>
-                        <span class="ds-chip">${escapeHtml(hdr.Cust_Name || 'مناقلة')}</span>
-                        <span class="ds-chip">عملة: ${escapeHtml(hdr.CurrencyName || '-')}</span>
-                        <span class="ds-chip">إجمالي: ${gt.toFixed(2)}</span>
-                        <span class="ds-chip ds-disc">خصم: ${gd.toFixed(2)}</span>
-                        ${ge ? `<span class="ds-chip ds-extra">إضافي: ${ge.toFixed(2)}</span>` : ''}
-                        ${gvat ? `<span class="ds-chip">ضريبة: ${gvat.toFixed(2)}</span>` : ''}
-                        <span class="ds-chip ds-grand">الصافي: ${grand.toFixed(2)}</span>
-                    </div>`;
-                html = summary + html;
-            }
-
-            detailsDiv.innerHTML = html;
+            renderDetails(data, false);
         } catch (e) {
+            if (activeBillGuid !== guid) return;
             detailsDiv.innerHTML = `<div class="error">${e.message}</div>`;
         }
     }
+
+    function renderDetails(data, isRefresh) {
+        const detailsDiv = document.getElementById('detailsContainer');
+        const items = Array.isArray(data.items) ? data.items : [];
+        const hdr   = data.header || null;
+
+        if (!items.length) {
+            detailsDiv.innerHTML = '<div class="loading">لا توجد أصناف في هذه الفاتورة.</div>';
+            return;
+        }
+
+        const num = v => {
+            const n = parseFloat(v);
+            return isFinite(n) ? n : 0;
+        };
+
+        let sumTotal = 0, sumDisc = 0, sumExtra = 0, sumNet = 0;
+
+        let html = '<table><thead><tr>';
+        html += '<th>#</th><th>اسم الصنف</th><th>الكمية</th><th>الوحدة</th>'
+            + '<th>سعر الوحدة</th><th>الإجمالي</th><th>الخصم</th><th>إضافي</th><th>الصافي</th>';
+        html += '</tr></thead><tbody>';
+
+        items.forEach((row, i) => {
+            const total = num(row.Total);
+            const disc  = num(row.DiscountValue);
+            const extra = num(row.Extra);
+            const net   = num(row.Net);
+            sumTotal += total;
+            sumDisc  += disc;
+            sumExtra += extra;
+            sumNet   += net;
+
+            html += `<tr>
+                <td>${i + 1}</td>
+                <td>${escapeHtml(row.ItemName)}</td>
+                <td>${fmtNum(row.Qty)}</td>
+                <td>${escapeHtml(row.Unit) || '-'}</td>
+                <td>${fmtNum(row.UnitPrice)}</td>
+                <td>${fmtNum(total)}</td>
+                <td>${fmtNum(disc)}</td>
+                <td>${fmtNum(extra)}</td>
+                <td>${fmtNum(net)}</td>
+            </tr>`;
+        });
+
+        html += '</tbody><tfoot><tr class="totals-row">';
+        html += '<td colspan="2">الإجمالي</td>';
+        html += '<td></td><td></td><td></td>';
+        html += `<td>${fmtNum(sumTotal)}</td>`;
+        html += `<td>${fmtNum(sumDisc)}</td>`;
+        html += `<td>${fmtNum(sumExtra)}</td>`;
+        html += `<td>${fmtNum(sumNet)}</td>`;
+        html += '</tr></tfoot></table>';
+
+        if (hdr) {
+            const gt   = num(hdr.Total);
+            const gd   = num(hdr.TotalDisc);
+            const ge   = num(hdr.TotalExtra);
+            const gvat = num(hdr.VAT);
+            const grand = gt - gd + ge;
+
+            // ── Consistency check: does the header match the sum of items? ──
+            const EPSILON = 0.01;   // tolerance for rounding
+            const mismatchTotal = Math.abs(gt - sumTotal) > EPSILON;
+            const mismatchDisc  = Math.abs(gd - sumDisc)  > EPSILON;
+            const mismatchExtra = Math.abs(ge - sumExtra) > EPSILON;
+            const hasMismatch   = mismatchTotal || mismatchDisc || mismatchExtra;
+
+            const summary = `
+                <div class="details-summary ${hasMismatch ? 'has-mismatch' : ''}">
+                    <span class="ds-chip ds-num">فاتورة #${escapeHtml(hdr.Number)}</span>
+                    <span class="ds-chip">${escapeHtml(hdr.Cust_Name || 'مناقلة')}</span>
+                    <span class="ds-chip">عملة: ${escapeHtml(hdr.CurrencyName || '-')}</span>
+                    <span class="ds-chip">إجمالي: ${fmtNum(gt)}</span>
+                    <span class="ds-chip ds-disc">خصم: ${fmtNum(gd)}</span>
+                    ${ge ? `<span class="ds-chip ds-extra">إضافي: ${fmtNum(ge)}</span>` : ''}
+                    ${gvat ? `<span class="ds-chip">ضريبة: ${fmtNum(gvat)}</span>` : ''}
+                    <span class="ds-chip ds-grand">الصافي: ${fmtNum(grand)}</span>
+                    ${hasMismatch
+                        ? `<span class="ds-chip ds-warn" title="الإجمالي المسجل في الترويسة لا يطابق مجموع الأصناف">⚠ عدم تطابق الترويسة مع الأصناف</span>`
+                        : ''}
+                </div>`;
+
+            // If mismatched, insert a small explanatory banner above the table
+            const mismatchBanner = hasMismatch ? `
+                <div class="mismatch-banner">
+                    <b>⚠ تنبيه:</b> الإجمالي المسجل في ترويسة الفاتورة (<b>${fmtNum(gt)}</b>)
+                    لا يطابق مجموع الأصناف (<b>${fmtNum(sumTotal)}</b>).
+                    الفرق: <b>${fmtNum(Math.abs(gt - sumTotal))}</b>.
+                    ${mismatchDisc  ? `الخصم المسجل (<b>${fmtNum(gd)}</b>) لا يطابق مجموع الخصومات (<b>${fmtNum(sumDisc)}</b>). ` : ''}
+                    ${mismatchExtra ? `الإضافي المسجل (<b>${fmtNum(ge)}</b>) لا يطابق مجموع الإضافات (<b>${fmtNum(sumExtra)}</b>). ` : ''}
+                    <br><span class="mismatch-hint">غالباً السبب: تعديل يدوي على قاعدة البيانات، أو حفظ غير مكتمل للفاتورة من الكاشير.</span>
+                </div>` : '';
+
+            html = summary + mismatchBanner + html;
+        }
+
+        detailsDiv.innerHTML = html;
+
+        // Signature of what we just rendered, so refresh can compare
+        lastDetailsSignature = JSON.stringify(data);
+
+        // If this was a refresh, flash the header and update the card in the list
+        if (isRefresh && hdr) {
+            flashDetailsHeader();
+            updateBillCardFromHeader(hdr);
+        }
+    }
+
+    // ---------- Auto-refresh the currently open bill ----------
+    const DETAILS_REFRESH_MS = 10000;   // 10 seconds
+
+    async function refreshActiveBillDetails() {
+        if (!activeBillGuid) return;
+        if (document.hidden) return;     // don't poll when the tab is in the background
+
+        const guid = activeBillGuid;
+
+        try {
+            const resp = await fetch(`?details=1&guid=${guid}`);
+            const data = await resp.json();
+            if (data.error) return;
+            if (activeBillGuid !== guid) return;   // user switched bills mid-flight
+
+            const sig = JSON.stringify(data);
+            if (sig === lastDetailsSignature) return;   // nothing changed
+
+            renderDetails(data, true);
+        } catch (e) {
+            // Silent fail — next tick will try again
+        }
+    }
+
+    function updateBillCardFromHeader(hdr) {
+        if (!hdr || !hdr.GUID) return;
+        const card = document.querySelector(`.bill-card[data-guid="${hdr.GUID}"]`);
+        if (!card) return;
+
+        // Update the cached bill so a later re-render is consistent
+        const cached = displayed.get(hdr.GUID);
+        if (cached) {
+            cached.Total      = hdr.Total;
+            cached.TotalDisc  = hdr.TotalDisc;
+            cached.TotalExtra = hdr.TotalExtra;
+            cached.Cust_Name  = hdr.Cust_Name;
+            cached.PayType    = hdr.PayType;
+        }
+
+        const num = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+        const total = num(hdr.Total);
+        const disc  = num(hdr.TotalDisc);
+        const extra = num(hdr.TotalExtra);
+        const net   = total - disc + extra;
+
+        const netEl = card.querySelector('.bill-net');
+        if (netEl) netEl.textContent = `${fmtNum(net)} ${hdr.CurrencyName || ''}`;
+
+        const metaEl = card.querySelector('.bill-meta');
+        if (metaEl) {
+            const timeStr = new Date(hdr.CreateDate).toLocaleTimeString('ar-EG-u-nu-latn');
+            metaEl.innerHTML = `
+                <span>💰 إجمالي: ${fmtNum(total)}</span>
+                ${disc ? `<span class="meta-disc">➖ خصم: ${fmtNum(disc)}</span>` : ''}
+                ${extra ? `<span class="meta-extra">➕ إضافي: ${fmtNum(extra)}</span>` : ''}
+                <span>💳 ${payTypeLabel(hdr.PayType)}</span>
+                <span>🏬 ${escapeHtml(hdr.StoreName || '-')}</span>
+                <span>📊 ${escapeHtml(hdr.CostCenterName || '-')}</span>
+                <span>📅 ${new Date(hdr.Date).toLocaleDateString('ar-EG-u-nu-latn')}</span>
+                <span>🕒 ${timeStr}</span>
+            `;
+        }
+
+        // Visual cue that the card changed
+        card.classList.add('card-updated');
+        setTimeout(() => card.classList.remove('card-updated'), 1500);
+    }
+
+    function flashDetailsHeader() {
+        const hdr = document.querySelector('.details-header');
+        if (!hdr) return;
+
+        let pill = hdr.querySelector('.update-pill');
+        if (!pill) {
+            pill = document.createElement('span');
+            pill.className = 'update-pill';
+            hdr.appendChild(pill);
+        }
+        pill.textContent = '🔄 تم التحديث';
+        pill.classList.add('show');
+        clearTimeout(pill._hideTimer);
+        pill._hideTimer = setTimeout(() => pill.classList.remove('show'), 2500);
+    }
+
+    setInterval(refreshActiveBillDetails, DETAILS_REFRESH_MS);
+
+    // Refresh immediately when the user brings the tab back into focus
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) refreshActiveBillDetails();
+    });
 
     function escapeHtml(str) {
         return String(str || '').replace(/[&<>]/g, function(m) {
@@ -1351,14 +1863,29 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         });
     }
 
+    // ---------- Number formatting ----------
+    // Western (Latin) digits with thousand separators: 14112 -> "14,112.00"
+    const _numFmt = new Intl.NumberFormat('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+
+    function fmtNum(v) {
+        const n = parseFloat(v);
+        return isFinite(n) ? _numFmt.format(n) : '0.00';
+    }
+
     document.getElementById('loadMoreBtn').addEventListener('click', function() {
         if (isLoadingMore || !hasMore) return;
         isLoadingMore = true;
         loadBills(true);
     });
 
-    loadBills();
-    setInterval(() => loadBills(false), 5000);
+    (async () => {
+        await loadBills(false);   // initial snapshot
+        resetNotifySuppression(); // don't chime for the historical bills we just loaded
+        startSSE();               // then keep it live
+    })();
 </script>
 </body>
 </html>
