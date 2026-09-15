@@ -84,6 +84,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
                         b.Cust_Name,
                         b.Date,
                         b.PayType,
+                        b.Total,
+                        b.TotalDisc,
+                        b.TotalExtra,
                         cur.Name AS CurrencyName,
                         s.Name AS StoreName,
                         cc.Name AS CostCenterName,
@@ -109,6 +112,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
                         b.Cust_Name,
                         b.Date,
                         b.PayType,
+                        b.Total,
+                        b.TotalDisc,
+                        b.TotalExtra,
                         cur.Name AS CurrencyName,
                         s.Name AS StoreName,
                         cc.Name AS CostCenterName,
@@ -144,25 +150,73 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
 if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
     header('Content-Type: application/json');
     $guid = $_GET['guid'];
+
+    // Basic UUID validation to avoid malformed input reaching SQL
+    if (!preg_match('/^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/', $guid)) {
+        echo json_encode(['error' => 'Invalid GUID']);
+        exit;
+    }
+
     try {
         $pdo = getDBConnection();
-        $sql = "SELECT 
+
+        // Reusable factor expression: convert stored base-unit Qty -> displayed Qty
+        $dispQty = "CASE d.Unity
+                        WHEN 2 THEN d.Qty / NULLIF(m.Unit2Fact, 0)
+                        WHEN 3 THEN d.Qty / NULLIF(m.Unit3Fact, 0)
+                        ELSE d.Qty
+                    END";
+        $dispUnit = "CASE d.Unity
+                        WHEN 2 THEN m.Unit2
+                        WHEN 3 THEN m.Unit3
+                        ELSE m.Unity
+                     END";
+
+        $sql = "SELECT
                     m.Name AS ItemName,
-                    d.Qty,
                     d.Price AS UnitPrice,
-                    (d.Qty * d.Price) AS Total,
-                    d.Extra,
-                    d.Unity AS Unit,
-                    d.Discount AS DiscountPercent,
-                    (d.Qty * d.Price * d.Discount / 100) AS DiscountValue
+                    d.Extra AS Extra,
+                    d.Discount AS DiscountValue,
+                    $dispQty AS Qty,
+                    $dispUnit AS Unit,
+                    ($dispQty) * d.Price AS Total,
+                    ($dispQty) * d.Price - d.Discount + d.Extra AS Net
                 FROM bi000 d
                 LEFT JOIN mt000 m ON d.MatGUID = m.GUID
                 WHERE d.ParentGUID = :guid
                 ORDER BY d.GUID";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([':guid' => $guid]);
-        $details = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        echo json_encode($details);
+        $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Header totals so the UI can show the authoritative figures
+        $hdrSql = "SELECT
+                       b.Number,
+                       b.Cust_Name,
+                       b.Date,
+                       b.Total,
+                       b.TotalDisc,
+                       b.TotalExtra,
+                       b.ItemsDisc,
+                       b.BonusDisc,
+                       b.VAT,
+                       b.PayType,
+                       cur.Name AS CurrencyName,
+                       s.Name   AS StoreName,
+                       cc.Name  AS CostCenterName
+                   FROM bu000 b
+                   LEFT JOIN my000 cur ON b.CurrencyGUID = cur.GUID
+                   LEFT JOIN st000  s   ON b.StoreGUID   = s.GUID
+                   LEFT JOIN co000  cc  ON b.CostGUID    = cc.GUID
+                   WHERE b.GUID = :guid";
+        $hdrStmt = $pdo->prepare($hdrSql);
+        $hdrStmt->execute([':guid' => $guid]);
+        $header = $hdrStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+
+        echo json_encode(
+            ['items' => $items, 'header' => $header],
+            JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
+        );
     } catch (Exception $e) {
         echo json_encode(['error' => $e->getMessage()]);
     }
@@ -601,6 +655,59 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         .loading, .error { padding: 24px; text-align: center; font-size: 0.85rem; }
         .error { color: var(--danger); background: #fef2f2; border-radius: 10px; margin: 10px; }
 
+        /* Details summary bar */
+        .details-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 8px;
+            padding: 10px 14px;
+            background: #f8fafc;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+        .ds-chip {
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            color: var(--text);
+            white-space: nowrap;
+        }
+        .ds-num   { background: var(--primary); color: white; border-color: var(--primary); }
+        .ds-disc  { background: #fef2f2; color: var(--danger); border-color: #fecaca; }
+        .ds-extra { background: #fffbeb; color: #b45309; border-color: #fde68a; }
+        .ds-grand { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+
+        /* Totals row in details table */
+        tr.totals-row td {
+            background: #f1f5f9;
+            font-weight: 800;
+            color: #0f172a;
+            border-top: 2px solid var(--border);
+            border-bottom: none;
+            position: sticky;
+            bottom: 0;
+        }
+
+        /* Highlighted net amount on each bill card */
+        .bill-net {
+            margin-right: auto;         /* pushes it to the far-left in RTL */
+            background: #ecfdf5;
+            color: #047857;
+            font-weight: 800;
+            font-size: 0.82rem;
+            padding: 3px 10px;
+            border-radius: 999px;
+            border: 1px solid #a7f3d0;
+            white-space: nowrap;
+        }
+        .bill-meta .meta-disc  { background: #fef2f2; color: var(--danger); }
+        .bill-meta .meta-extra { background: #fffbeb; color: #b45309; }
+
         /* ---------- Responsive ---------- */
         @media (max-width: 900px) {
             body { padding: 10px; }
@@ -715,6 +822,19 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
 </div>
 
 <script>
+
+    // Alameen bill PayType mapping.
+    // Edit this table if you find more values in bu000 (e.g. 2 = مختلط).
+    const PAY_TYPES = {
+        '0': 'نقدي',
+        '1': 'آجل'
+    };
+
+    function payTypeLabel(v) {
+        if (v === null || v === undefined || v === '') return '-';
+        const key = String(v).trim();
+        return PAY_TYPES[key] || ('نوع ' + key);
+    }
     // ---------- Splitter logic (draggable) ----------
     const topSection = document.getElementById('topSection');
     const splitter = document.getElementById('splitter');
@@ -1092,6 +1212,13 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
     }
 
     function addBillCard(bill, prependFlag) {
+        const num = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+
+        const total = num(bill.Total);
+        const disc  = num(bill.TotalDisc);
+        const extra = num(bill.TotalExtra);
+        const net   = total - disc + extra;
+
         let div = document.createElement('div');
         div.className = 'bill-card' + (prependFlag ? ' new-flash' : '');
         div.dataset.guid = bill.GUID;
@@ -1099,10 +1226,13 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
             <div class="bill-title">
                 <span class="bill-number">#${bill.Number}</span>
                 <span class="bill-customer">${escapeHtml(bill.Cust_Name || 'مناقلة')}</span>
+                <span class="bill-net">${net.toFixed(2)} ${escapeHtml(bill.CurrencyName || '')}</span>
             </div>
             <div class="bill-meta">
-                <span>💰 ${escapeHtml(bill.CurrencyName || '-')}</span>
-                <span>💳 ${escapeHtml(bill.PayType || '-')}</span>
+                <span>💰 إجمالي: ${total.toFixed(2)}</span>
+                ${disc ? `<span class="meta-disc">➖ خصم: ${disc.toFixed(2)}</span>` : ''}
+                ${extra ? `<span class="meta-extra">➕ إضافي: ${extra.toFixed(2)}</span>` : ''}
+                <span>💳 ${payTypeLabel(bill.PayType)}</span>
                 <span>🏬 ${escapeHtml(bill.StoreName || '-')}</span>
                 <span>📊 ${escapeHtml(bill.CostCenterName || '-')}</span>
                 <span>📅 ${new Date(bill.Date).toLocaleDateString('ar-EG-u-nu-latn')}</span>
@@ -1121,35 +1251,92 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
     async function showDetails(guid, element) {
         document.querySelectorAll('.bill-card').forEach(c => c.classList.remove('active'));
         element.classList.add('active');
+
         const detailsDiv = document.getElementById('detailsContainer');
         detailsDiv.innerHTML = '<div class="loading">جاري تحميل التفاصيل...</div>';
+
         try {
             let resp = await fetch(`?details=1&guid=${guid}`);
             let data = await resp.json();
             if (data.error) throw new Error(data.error);
-            if (!data.length) {
+
+            const items  = Array.isArray(data.items) ? data.items : [];
+            const hdr    = data.header || null;
+
+            if (!items.length) {
                 detailsDiv.innerHTML = '<div class="loading">لا توجد أصناف في هذه الفاتورة.</div>';
                 return;
             }
-            let html = `<div class="table-wrapper"> <table> <thead> <tr>
-                <th>اسم الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th>
-                <th>إضافي</th><th>الوحدة</th><th>نسبة الخصم</th><th>قيمة الخصم</th>
-             </tr> </thead> <tbody>`;
-            for (let row of data) {
+
+            const num = v => {
+                const n = parseFloat(v);
+                return isFinite(n) ? n : 0;
+            };
+            const fmt = v => num(v).toFixed(2);
+
+            let sumTotal = 0, sumDisc = 0, sumExtra = 0, sumNet = 0;
+
+            let html = '<table><thead><tr>';
+            html += '<th>#</th><th>اسم الصنف</th><th>الكمية</th><th>الوحدة</th>'
+                + '<th>سعر الوحدة</th><th>الإجمالي</th><th>الخصم</th><th>إضافي</th><th>الصافي</th>';
+            html += '</tr></thead><tbody>';
+
+            items.forEach((row, i) => {
+                const total = num(row.Total);
+                const disc  = num(row.DiscountValue);
+                const extra = num(row.Extra);
+                const net   = num(row.Net);
+                sumTotal += total;
+                sumDisc  += disc;
+                sumExtra += extra;
+                sumNet   += net;
+
                 html += `<tr>
+                    <td>${i + 1}</td>
                     <td>${escapeHtml(row.ItemName)}</td>
-                    <td>${parseFloat(row.Qty).toFixed(2)}</td>
-                    <td>${parseFloat(row.UnitPrice).toFixed(2)}</td>
-                    <td>${parseFloat(row.Total).toFixed(2)}</td>
-                    <td>${parseFloat(row.Extra).toFixed(2)}</td>
+                    <td>${fmt(row.Qty)}</td>
                     <td>${escapeHtml(row.Unit) || '-'}</td>
-                    <td>${parseFloat(row.DiscountPercent).toFixed(2)}%</td>
-                    <td>${parseFloat(row.DiscountValue).toFixed(2)}</td>
+                    <td>${fmt(row.UnitPrice)}</td>
+                    <td>${fmt(total)}</td>
+                    <td>${fmt(disc)}</td>
+                    <td>${fmt(extra)}</td>
+                    <td>${fmt(net)}</td>
                 </tr>`;
+            });
+
+            html += '</tbody><tfoot><tr class="totals-row">';
+            html += '<td colspan="2">الإجمالي</td>';
+            html += '<td></td><td></td><td></td>';
+            html += `<td>${sumTotal.toFixed(2)}</td>`;
+            html += `<td>${sumDisc.toFixed(2)}</td>`;
+            html += `<td>${sumExtra.toFixed(2)}</td>`;
+            html += `<td>${sumNet.toFixed(2)}</td>`;
+            html += '</tr></tfoot></table>';
+
+            // Header summary bar (authoritative totals from bu000)
+            if (hdr) {
+                const gt   = num(hdr.Total);
+                const gd   = num(hdr.TotalDisc);
+                const ge   = num(hdr.TotalExtra);
+                const gvat = num(hdr.VAT);
+                const grand = gt - gd + ge;
+
+                const summary = `
+                    <div class="details-summary">
+                        <span class="ds-chip ds-num">فاتورة #${escapeHtml(hdr.Number)}</span>
+                        <span class="ds-chip">${escapeHtml(hdr.Cust_Name || 'مناقلة')}</span>
+                        <span class="ds-chip">عملة: ${escapeHtml(hdr.CurrencyName || '-')}</span>
+                        <span class="ds-chip">إجمالي: ${gt.toFixed(2)}</span>
+                        <span class="ds-chip ds-disc">خصم: ${gd.toFixed(2)}</span>
+                        ${ge ? `<span class="ds-chip ds-extra">إضافي: ${ge.toFixed(2)}</span>` : ''}
+                        ${gvat ? `<span class="ds-chip">ضريبة: ${gvat.toFixed(2)}</span>` : ''}
+                        <span class="ds-chip ds-grand">الصافي: ${grand.toFixed(2)}</span>
+                    </div>`;
+                html = summary + html;
             }
-            html += `</tbody> </table> </div>`;
+
             detailsDiv.innerHTML = html;
-        } catch(e) {
+        } catch (e) {
             detailsDiv.innerHTML = `<div class="error">${e.message}</div>`;
         }
     }
