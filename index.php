@@ -88,6 +88,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
                         b.Total,
                         b.TotalDisc,
                         b.TotalExtra,
+                        b.CurrencyVal,
                         cur.Name AS CurrencyName,
                         s.Name AS StoreName,
                         cc.Name AS CostCenterName,
@@ -116,6 +117,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
                         b.Total,
                         b.TotalDisc,
                         b.TotalExtra,
+                        b.CurrencyVal,
                         cur.Name AS CurrencyName,
                         s.Name AS StoreName,
                         cc.Name AS CostCenterName,
@@ -178,6 +180,7 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
                     d.Price AS UnitPrice,
                     d.Extra AS Extra,
                     d.Discount AS DiscountValue,
+                    d.CurrencyVal,
                     $dispQty AS Qty,
                     $dispUnit AS Unit,
                     ($dispQty) * d.Price AS Total,
@@ -203,6 +206,7 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
                        b.ItemsDisc,
                        b.BonusDisc,
                        b.VAT,
+                       b.CurrencyVal,
                        b.CreateDate,
                        cur.Name AS CurrencyName,
                        s.Name   AS StoreName,
@@ -1585,10 +1589,11 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
 
     function addBillCard(bill, prependFlag) {
         const num = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+        const cv  = num(bill.CurrencyVal) || 1;
 
-        const total = num(bill.Total);
-        const disc  = num(bill.TotalDisc);
-        const extra = num(bill.TotalExtra);
+        const total = num(bill.Total)     / cv;
+        const disc  = num(bill.TotalDisc) / cv;
+        const extra = num(bill.TotalExtra)/ cv;
         const net   = total - disc + extra;
 
         let div = document.createElement('div');
@@ -1677,10 +1682,12 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         html += '</tr></thead><tbody>';
 
         items.forEach((row, i) => {
-            const total = num(row.Total);
-            const disc  = num(row.DiscountValue);
-            const extra = num(row.Extra);
-            const net   = num(row.Net);
+            const iCv   = num(row.CurrencyVal) || 1;
+            const price = num(row.UnitPrice)   / iCv;
+            const total = num(row.Total)       / iCv;
+            const disc  = num(row.DiscountValue) / iCv;
+            const extra = num(row.Extra)       / iCv;
+            const net   = total - disc + extra;
             sumTotal += total;
             sumDisc  += disc;
             sumExtra += extra;
@@ -1709,10 +1716,11 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         html += '</tr></tfoot></table>';
 
         if (hdr) {
-            const gt   = num(hdr.Total);
-            const gd   = num(hdr.TotalDisc);
-            const ge   = num(hdr.TotalExtra);
-            const gvat = num(hdr.VAT);
+            const hCv   = num(hdr.CurrencyVal) || 1;
+            const gt    = num(hdr.Total)      / hCv;
+            const gd    = num(hdr.TotalDisc)  / hCv;
+            const ge    = num(hdr.TotalExtra) / hCv;
+            const gvat  = num(hdr.VAT)        / hCv;
             const grand = gt - gd + ge;
 
             // ── Consistency check: does the header match the sum of items? ──
@@ -1803,9 +1811,10 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         }
 
         const num = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
-        const total = num(hdr.Total);
-        const disc  = num(hdr.TotalDisc);
-        const extra = num(hdr.TotalExtra);
+        const cv    = num(hdr.CurrencyVal) || 1;
+        const total = num(hdr.Total)      / cv;
+        const disc  = num(hdr.TotalDisc)  / cv;
+        const extra = num(hdr.TotalExtra) / cv;
         const net   = total - disc + extra;
 
         const netEl = card.querySelector('.bill-net');
@@ -1873,6 +1882,17 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
     function fmtNum(v) {
         const n = parseFloat(v);
         return isFinite(n) ? _numFmt.format(n) : '0.00';
+    }
+
+    // Convert an amount stored in the base currency (USD) to the bill's currency.
+    // bu000.CurrencyVal = "how much of base currency is 1 unit of the bill's currency",
+    // so dividing gives the amount in the bill's currency.
+    function toBillCurrency(storedAmount, currencyVal) {
+        const v  = parseFloat(storedAmount);
+        const cv = parseFloat(currencyVal);
+        if (!isFinite(v))  return 0;
+        if (!isFinite(cv) || cv <= 0) return v;   // guard against missing rate
+        return v / cv;
     }
 
     document.getElementById('loadMoreBtn').addEventListener('click', function() {

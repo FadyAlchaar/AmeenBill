@@ -78,6 +78,7 @@ $sql = "SELECT
             b.Total,
             b.TotalDisc,
             b.TotalExtra,
+            b.CurrencyVal,
             cur.Name AS CurrencyName,
             s.Name   AS StoreName,
             cc.Name  AS CostCenterName,
