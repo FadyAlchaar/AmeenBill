@@ -1,6 +1,6 @@
 <?php
 // config.php
-define('APP_ENV', 'dev');   // ← change to 'prod' on the production server
+define('APP_ENV', '');   // ← change to 'prod' on the production server
 
 if (APP_ENV === 'prod') {
     define('DB_SERVER', 'localhost');
