@@ -40,7 +40,6 @@ if (isset($_GET['filters']) && $_GET['filters'] == 1) {
 // AJAX handler for bills list
 if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
     header('Content-Type: application/json');
-    $lastDate = isset($_GET['lastDate']) ? $_GET['lastDate'] : null;
     $loadMore = isset($_GET['loadMore']) ? (int)$_GET['loadMore'] : 0;
 
     // ---- Filter inputs ----
@@ -49,7 +48,11 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
     $fDateFrom = isset($_GET['dateFrom']) && $_GET['dateFrom'] !== '' ? $_GET['dateFrom'] : null;
     $fDateTo   = isset($_GET['dateTo']) && $_GET['dateTo'] !== '' ? $_GET['dateTo'] : null;
 
-    // Build reusable WHERE fragments + params for the filters
+    // ---- Delta watermarks (optional) ----
+    $sinceCreate = isset($_GET['sinceCreate']) && $_GET['sinceCreate'] !== '' ? $_GET['sinceCreate'] : null;
+    $sinceUpdate = isset($_GET['sinceUpdate']) && $_GET['sinceUpdate'] !== '' ? $_GET['sinceUpdate'] : null;
+
+    // Build filter fragments
     $filterSql = [];
     $filterParams = [];
     if ($fCustomer !== null) {
@@ -69,80 +72,108 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == 1) {
         $filterParams[':fDateTo'] = $fDateTo . ' 00:00:00';
     }
 
+    $selectCols = "
+        b.GUID,
+        b.Number,
+        b.Cust_Name,
+        b.Date,
+        b.PayType,
+        b.Total,
+        b.TotalDisc,
+        b.TotalExtra,
+        b.CurrencyVal,
+        cur.Name AS CurrencyName,
+        s.Name AS StoreName,
+        cc.Name AS CostCenterName,
+        b.CreateDate,
+        b.LastUpdateDate
+    ";
+
+    $SENTINEL = '1980-01-01 00:00:00.000';
+
     try {
         $pdo = getDBConnection();
-        if ($lastDate && !$loadMore) {
-            $dt = new DateTime($lastDate);
-            $sqlDate = $dt->format('Y-m-d H:i:s');
 
-            $where = ["b.CreateDate > :lastDate"];
+        // ── Delta mode: bills created OR edited since the given watermarks ──
+        if ($sinceCreate !== null || $sinceUpdate !== null) {
+            try {
+                $sinceCreateSql = $sinceCreate
+                    ? (new DateTime($sinceCreate))->format('Y-m-d H:i:s.v')
+                    : $SENTINEL;
+            } catch (Exception $e) { $sinceCreateSql = $SENTINEL; }
+
+            try {
+                $sinceUpdateSql = $sinceUpdate
+                    ? (new DateTime($sinceUpdate))->format('Y-m-d H:i:s.v')
+                    : $SENTINEL;
+            } catch (Exception $e) { $sinceUpdateSql = $SENTINEL; }
+
+            $where = ["(b.CreateDate > :sinceCreate OR b.LastUpdateDate > :sinceUpdate)"];
             $where = array_merge($where, $filterSql);
             $whereSql = implode(' AND ', $where);
 
-            $sql = "SELECT 
-                        b.GUID,
-                        b.Number,
-                        b.Cust_Name,
-                        b.Date,
-                        b.PayType,
-                        b.Total,
-                        b.TotalDisc,
-                        b.TotalExtra,
-                        b.CurrencyVal,
-                        cur.Name AS CurrencyName,
-                        s.Name AS StoreName,
-                        cc.Name AS CostCenterName,
-                        b.CreateDate
+            $sql = "SELECT TOP 500 $selectCols
                     FROM bu000 b
                     LEFT JOIN my000 cur ON b.CurrencyGUID = cur.GUID
-                    LEFT JOIN st000 s ON b.StoreGUID = s.GUID
-                    LEFT JOIN co000 cc ON b.CostGUID = cc.GUID
+                    LEFT JOIN st000 s   ON b.StoreGUID   = s.GUID
+                    LEFT JOIN co000 cc  ON b.CostGUID    = cc.GUID
                     WHERE $whereSql
                     ORDER BY b.CreateDate ASC";
             $stmt = $pdo->prepare($sql);
-            $params = array_merge([':lastDate' => $sqlDate], $filterParams);
+            $params = array_merge([
+                ':sinceCreate' => $sinceCreateSql,
+                ':sinceUpdate' => $sinceUpdateSql,
+            ], $filterParams);
             $stmt->execute($params);
-        } else {
-            $limit = 200;
-            $offset = $loadMore * $limit;
 
-            $whereSql = count($filterSql) ? ('WHERE ' . implode(' AND ', $filterSql)) : '';
-
-            $sql = "SELECT 
-                        b.GUID,
-                        b.Number,
-                        b.Cust_Name,
-                        b.Date,
-                        b.PayType,
-                        b.Total,
-                        b.TotalDisc,
-                        b.TotalExtra,
-                        b.CurrencyVal,
-                        cur.Name AS CurrencyName,
-                        s.Name AS StoreName,
-                        cc.Name AS CostCenterName,
-                        b.CreateDate
-                    FROM bu000 b
-                    LEFT JOIN my000 cur ON b.CurrencyGUID = cur.GUID
-                    LEFT JOIN st000 s ON b.StoreGUID = s.GUID
-                    LEFT JOIN co000 cc ON b.CostGUID = cc.GUID
-                    $whereSql
-                    ORDER BY b.CreateDate DESC
-                    OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY";
-            $stmt = $pdo->prepare($sql);
-            foreach ($filterParams as $key => $val) {
-                $stmt->bindValue($key, $val);
+            $bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($bills as &$bill) {
+                $bill['Date']       = (new DateTime($bill['Date']))->format('c');
+                $bill['CreateDate'] = (new DateTime($bill['CreateDate']))->format('c');
+                if ($bill['LastUpdateDate']) {
+                    $bill['LastUpdateDate'] = (strcmp($bill['LastUpdateDate'], $SENTINEL) <= 0)
+                        ? null
+                        : (new DateTime($bill['LastUpdateDate']))->format('c');
+                }
             }
-            $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
-            $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-            $stmt->execute();
+            unset($bill);
+            echo json_encode($bills, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            exit;
         }
+
+        // ── Initial load OR Load More ─────────────────────────────
+        $limit  = 200;
+        $offset = $loadMore * $limit;
+        $whereSql = count($filterSql) ? ('WHERE ' . implode(' AND ', $filterSql)) : '';
+
+        $sql = "SELECT $selectCols
+                FROM bu000 b
+                LEFT JOIN my000 cur ON b.CurrencyGUID = cur.GUID
+                LEFT JOIN st000 s ON b.StoreGUID = s.GUID
+                LEFT JOIN co000 cc ON b.CostGUID = cc.GUID
+                $whereSql
+                ORDER BY b.CreateDate DESC
+                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY";
+        $stmt = $pdo->prepare($sql);
+        foreach ($filterParams as $key => $val) {
+            $stmt->bindValue($key, $val);
+        }
+        $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+        $stmt->bindValue(':limit',  $limit,  PDO::PARAM_INT);
+        $stmt->execute();
+
         $bills = $stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($bills as &$bill) {
-            $bill['Date'] = (new DateTime($bill['Date']))->format('c');
+            $bill['Date']       = (new DateTime($bill['Date']))->format('c');
             $bill['CreateDate'] = (new DateTime($bill['CreateDate']))->format('c');
+            if ($bill['LastUpdateDate']) {
+                $bill['LastUpdateDate'] = (strcmp($bill['LastUpdateDate'], $SENTINEL) <= 0)
+                    ? null
+                    : (new DateTime($bill['LastUpdateDate']))->format('c');
+            }
         }
-        echo json_encode($bills);
+        unset($bill);
+        echo json_encode($bills, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Exception $e) {
         echo json_encode(['error' => $e->getMessage()]);
     }
@@ -688,6 +719,7 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         .ds-disc  { background: #fef2f2; color: var(--danger); border-color: #fecaca; }
         .ds-extra { background: #fffbeb; color: #b45309; border-color: #fde68a; }
         .ds-grand { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+        .ds-rate  { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
 
         /* Totals row in details table */
         tr.totals-row td {
@@ -1176,7 +1208,8 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         updateFiltersToggleBadge();
 
         // Reset state and reload from scratch
-        lastMaxDate   = null;
+        lastCreateDate = null;
+        lastUpdateDate = null;
         displayed.clear();
         resetNotifySuppression();   // ← add this line
         loadMoreOffset = 1;
@@ -1193,6 +1226,7 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         // Reload, then restart SSE with the new filter set
         (async () => {
             await loadBills(false);
+            resetNotifySuppression();
             startSSE();
         })();
     }
@@ -1273,7 +1307,8 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
 
         let url = 'sse_bills.php';
         const params = [];
-        if (lastMaxDate) params.push('lastDate='  + encodeURIComponent(lastMaxDate));
+        if (lastCreateDate) params.push('lastCreate=' + encodeURIComponent(lastCreateDate));
+        if (lastUpdateDate) params.push('lastUpdate=' + encodeURIComponent(lastUpdateDate));
         if (activeFilters.customer) params.push('customer=' + encodeURIComponent(activeFilters.customer));
         if (activeFilters.salesman) params.push('salesman=' + encodeURIComponent(activeFilters.salesman));
         if (activeFilters.dateFrom) params.push('dateFrom=' + encodeURIComponent(activeFilters.dateFrom));
@@ -1295,22 +1330,37 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
 
         sseConnection.addEventListener('bills', (e) => {
             sseErrorCount = 0;
+
             let bills;
             try { bills = JSON.parse(e.data); } catch (err) { return; }
             if (!Array.isArray(bills) || !bills.length) return;
 
-            let newMax = lastMaxDate;
+            const actuallyNew = [];
+
             for (const bill of bills) {
-                if (bill.CreateDate > newMax) newMax = bill.CreateDate;
+                if (bill.CreateDate     && (!lastCreateDate || bill.CreateDate > lastCreateDate))
+                    lastCreateDate = bill.CreateDate;
+                if (bill.LastUpdateDate && (!lastUpdateDate || bill.LastUpdateDate > lastUpdateDate))
+                    lastUpdateDate = bill.LastUpdateDate;
+
                 if (!displayed.has(bill.GUID)) {
                     displayed.set(bill.GUID, bill);
                     addBillCard(bill, true);
+                    actuallyNew.push(bill);
+                } else {
+                    // Already on screen. Only flash if it was genuinely edited.
+                    const prev = displayed.get(bill.GUID);
+                    const prevLU = prev ? (prev.LastUpdateDate || '') : '';
+                    const newLU  = bill.LastUpdateDate || '';
+                    if (newLU !== prevLU) {
+                        displayed.set(bill.GUID, bill);
+                        updateBillCardFromHeader(bill);
+                    }
+                    // else: silent re-delivery — ignore
                 }
             }
-            if (newMax) lastMaxDate = newMax;
-            updateBillCount();
 
-            // Fire the sound + notification for genuinely new bills only
+            updateBillCount();
             if (actuallyNew.length) notifyNewBills(actuallyNew);
         });
 
@@ -1333,6 +1383,57 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         if (pollFallbackTimer) return;
         pollFallbackTimer = setInterval(() => loadBills(false), 5000);
     }
+    
+    async function pollNewBills() {
+        if (isLoadingMore) return;
+        if (document.hidden) return;
+
+        let url = '?ajax=1';
+        const _p = [];
+        if (lastCreateDate) _p.push('sinceCreate=' + encodeURIComponent(lastCreateDate));
+        if (lastUpdateDate) _p.push('sinceUpdate=' + encodeURIComponent(lastUpdateDate));
+        if (_p.length) url += '&' + _p.join('&');
+        url += buildFilterQuery();
+
+        try {
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (!Array.isArray(data) || !data.length) return;
+
+            const actuallyNew = [];
+            for (const bill of data) {
+                // Advance watermarks
+                if (bill.CreateDate && (!lastCreateDate || bill.CreateDate > lastCreateDate)) {
+                    lastCreateDate = bill.CreateDate;
+                }
+                if (bill.LastUpdateDate && (!lastUpdateDate || bill.LastUpdateDate > lastUpdateDate)) {
+                    lastUpdateDate = bill.LastUpdateDate;
+                }
+
+                if (!displayed.has(bill.GUID)) {
+                    displayed.set(bill.GUID, bill);
+                    addBillCard(bill, true);
+                    actuallyNew.push(bill);
+                } else {
+                    // Already on screen — only re-render if it was genuinely edited
+                    const prev   = displayed.get(bill.GUID);
+                    const prevLU = prev ? (prev.LastUpdateDate || '') : '';
+                    const newLU  = bill.LastUpdateDate || '';
+                    if (newLU !== prevLU) {
+                        displayed.set(bill.GUID, bill);
+                        updateBillCardFromHeader(bill);
+                    }
+                    // else: silent re-delivery — ignore
+                }
+            }
+
+            updateBillCount();
+            if (actuallyNew.length) notifyNewBills(actuallyNew);
+        } catch (e) {
+            // silent — next tick will retry
+        }
+    }
+
 
     function setLiveIndicator(state) {
         const badge = document.querySelector('.live-badge');
@@ -1474,7 +1575,7 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
     }
 
     // ─── Main entry point — call this from the SSE handler ─────────
-    let _suppressNextChime = true;   // true on first load to avoid chiming for old bills
+    let _suppressNextChime = false;   // true on first load to avoid chiming for old bills
 
     function notifyNewBills(bills) {
         if (!Array.isArray(bills) || bills.length === 0) return;
@@ -1502,11 +1603,12 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
     // Reset the suppression flag whenever the bill list is reset
     // (page load, filter change, SSE reconnect)
     function resetNotifySuppression() {
-        _suppressNextChime = true;
+        //_suppressNextChime = true;
     }
 
     // ---------- Dashboard functionality (unchanged from last working version) ----------
-    let lastMaxDate = null;
+    let lastCreateDate = null;
+    let lastUpdateDate = null;
     let displayed = new Map();
     let isLoadingMore = false;
     let loadMoreOffset = 1;
@@ -1516,19 +1618,19 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
         let url = '?ajax=1';
         if (isLoadMore) {
             url += '&loadMore=' + loadMoreOffset;
-        } else if (lastMaxDate !== null) {
-            url += '&lastDate=' + encodeURIComponent(lastMaxDate);
         }
         url += buildFilterQuery();
+
         try {
-            let resp = await fetch(url);
-            let text = await resp.text();
+            const resp = await fetch(url);
+            const text = await resp.text();
             let data;
             try {
                 data = JSON.parse(text);
-            } catch(e) {
-                console.error('JSON parse error:', e, 'Response:', text.substring(0,200));
-                document.getElementById('bills').innerHTML = '<div class="error">خطأ في استجابة الخادم. تحقق من وحدة التحكم.</div>';
+            } catch (e) {
+                console.error('JSON parse error:', e, 'Response:', text.substring(0, 200));
+                document.getElementById('bills').innerHTML =
+                    '<div class="error">خطأ في استجابة الخادم. تحقق من وحدة التحكم.</div>';
                 return;
             }
             if (data.error) {
@@ -1537,19 +1639,34 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
             }
             if (!Array.isArray(data)) return;
 
-            if (!isLoadMore && lastMaxDate === null) {
+            if (!isLoadMore) {
+                // Initial load OR filter change: reset everything
                 document.getElementById('bills').innerHTML = '';
                 displayed.clear();
-                for (let bill of data) {
+                lastCreateDate = null;
+                lastUpdateDate = null;
+
+                for (const bill of data) {
                     displayed.set(bill.GUID, bill);
                     addBillCard(bill, false);
+                    if (bill.CreateDate && (!lastCreateDate || bill.CreateDate > lastCreateDate)) {
+                        lastCreateDate = bill.CreateDate;
+                    }
                 }
-                if (data.length > 0) lastMaxDate = data[0].CreateDate;
+                // Rewind the initial watermark by 1s so we don't miss anything
+                // that arrived between the page-load query and the SSE connect.
+                if (lastCreateDate) {
+                    const t = new Date(lastCreateDate).getTime() - 1000;
+                    lastCreateDate = new Date(t).toISOString();
+                }
+                // From this moment forward, only catch edits newer than now.
+                lastUpdateDate = new Date().toISOString();
                 if (data.length < 200) hasMore = false;
                 document.getElementById('loadMoreBtn').style.display = hasMore ? 'block' : 'none';
                 updateBillCount();
-            } else if (isLoadMore) {
-                for (let bill of data) {
+            } else {
+                // Load More pagination
+                for (const bill of data) {
                     if (!displayed.has(bill.GUID)) {
                         displayed.set(bill.GUID, bill);
                         addBillCard(bill, false);
@@ -1560,22 +1677,14 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
                 document.getElementById('loadMoreBtn').style.display = hasMore ? 'block' : 'none';
                 isLoadingMore = false;
                 updateBillCount();
-            } else {
-                let newMaxDate = lastMaxDate;
-                for (let bill of data) {
-                    if (bill.CreateDate > newMaxDate) newMaxDate = bill.CreateDate;
-                    if (!displayed.has(bill.GUID)) {
-                        displayed.set(bill.GUID, bill);
-                        addBillCard(bill, true);
-                    }
-                }
-                lastMaxDate = newMaxDate;
-                if (data.length > 0) updateBillCount();
             }
-        } catch(e) {
+            // The old "delta" branch (lastMaxDate !== null) is gone —
+            // inserts are handled by SSE, edits and deletes by reconciliation.
+        } catch (e) {
             console.error('Fetch error:', e);
             if (!isLoadMore) {
-                document.getElementById('bills').innerHTML = `<div class="error">خطأ في الشبكة: ${e.message}</div>`;
+                document.getElementById('bills').innerHTML =
+                    `<div class="error">خطأ في الشبكة: ${e.message}</div>`;
             }
         } finally {
             if (isLoadMore) isLoadingMore = false;
@@ -1730,11 +1839,18 @@ if (isset($_GET['details']) && $_GET['details'] == 1 && isset($_GET['guid'])) {
             const mismatchExtra = Math.abs(ge - sumExtra) > EPSILON;
             const hasMismatch   = mismatchTotal || mismatchDisc || mismatchExtra;
 
+                        // Exchange rate chip: 1 USD = 1/CurrencyVal units of the bill currency.
+            const rate = (hCv > 0 && Math.abs(hCv - 1) > 0.000001) ? 1 / hCv : null;
+            const rateChip = rate
+                ? `<span class="ds-chip ds-rate" title="سعر الصرف وقت إصدار الفاتورة">💱 الدولار = <bdi dir="ltr">${fmtNum(rate)}</bdi> ${escapeHtml(hdr.CurrencyName || '')}</span>`
+                : '';
+
             const summary = `
                 <div class="details-summary ${hasMismatch ? 'has-mismatch' : ''}">
                     <span class="ds-chip ds-num">فاتورة #${escapeHtml(hdr.Number)}</span>
                     <span class="ds-chip">${escapeHtml(hdr.Cust_Name || 'مناقلة')}</span>
                     <span class="ds-chip">عملة: ${escapeHtml(hdr.CurrencyName || '-')}</span>
+                    ${rateChip}
                     <span class="ds-chip">إجمالي: ${fmtNum(gt)}</span>
                     <span class="ds-chip ds-disc">خصم: ${fmtNum(gd)}</span>
                     ${ge ? `<span class="ds-chip ds-extra">إضافي: ${fmtNum(ge)}</span>` : ''}
