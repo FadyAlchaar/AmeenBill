@@ -109,6 +109,12 @@ flush();
 
 $lastHeartbeat = time();
 
+// Track (GUID => LastUpdateDate-or-'') for every bill we've pushed.
+// This makes re-emitting the same bill impossible, regardless of what
+// happens with timestamp string comparisons.
+$sentState = [];
+const SENT_STATE_MAX = 5000;
+
 while (true) {
     if (connection_aborted()) break;
 
@@ -141,9 +147,9 @@ while (true) {
             if (count($bills) > 0) {
                 $newCreateMax = $lastCreateSql;
                 $newUpdateMax = $lastUpdateSql;
+                $toSend = [];
 
-                foreach ($bills as &$b) {
-                    // Normalize raw SQL-format timestamps FIRST, preserving ms
+                foreach ($bills as $b) {
                     $rawCreate = $b['CreateDate']
                         ? (new DateTime($b['CreateDate']))->format('Y-m-d H:i:s.v')
                         : null;
@@ -151,43 +157,60 @@ while (true) {
                         ? (new DateTime($b['LastUpdateDate']))->format('Y-m-d H:i:s.v')
                         : null;
 
-                    // Advance watermarks on the SQL-format strings (ms-safe)
+                    // Advance watermarks
                     if ($rawCreate && strcmp($rawCreate, $newCreateMax) > 0) {
                         $newCreateMax = $rawCreate;
                     }
-                    if ($rawUpdate
-                        && strcmp($rawUpdate, SQL_SENTINEL) > 0
-                        && strcmp($rawUpdate, $newUpdateMax) > 0) {
+                    $hasRealUpdate = $rawUpdate && strcmp($rawUpdate, SQL_SENTINEL) > 0;
+                    if ($hasRealUpdate && strcmp($rawUpdate, $newUpdateMax) > 0) {
                         $newUpdateMax = $rawUpdate;
                     }
 
-                    // Now convert to ISO for the client
+                    // Dedup: state key = LastUpdateDate string (or '' if never edited)
+                    $stateKey = $hasRealUpdate ? $rawUpdate : '';
+                    $guid     = $b['GUID'];
+
+                    $isDuplicate = isset($sentState[$guid]) && $sentState[$guid] === $stateKey;
+
+                    // Record the new state regardless, so the next tick sees it as duplicate
+                    $sentState[$guid] = $stateKey;
+
+                    if ($isDuplicate) {
+                        continue;   // already pushed — don't re-emit
+                    }
+
+                    // Convert to ISO for the wire
                     $b['Date']       = (new DateTime($b['Date']))->format('c');
                     $b['CreateDate'] = $rawCreate
                         ? (new DateTime($rawCreate))->format('c')
                         : null;
+                    $b['LastUpdateDate'] = $hasRealUpdate
+                        ? (new DateTime($rawUpdate))->format('c')
+                        : null;
 
-                    if ($rawUpdate && strcmp($rawUpdate, SQL_SENTINEL) > 0) {
-                        $b['LastUpdateDate'] = (new DateTime($rawUpdate))->format('c');
-                    } else {
-                        $b['LastUpdateDate'] = null;
-                    }
+                    $toSend[] = $b;
                 }
-                unset($b);
 
-                echo "event: bills\n";
-                echo 'data: ' . json_encode(
-                    $bills,
-                    JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
-                ) . "\n\n";
-                flush();
+                // Cap memory: drop oldest entries if needed
+                if (count($sentState) > SENT_STATE_MAX) {
+                    $sentState = array_slice($sentState, -SENT_STATE_MAX, null, true);
+                }
 
-                // Advance watermarks in SQL format (ms-safe)
+                if (!empty($toSend)) {
+                    echo "event: bills\n";
+                    echo 'data: ' . json_encode(
+                        $toSend,
+                        JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
+                    ) . "\n\n";
+                    flush();
+                    $lastHeartbeat = time();
+                }
+
+                // Always advance watermarks, even if everything was a duplicate
                 $lastCreateSql = $newCreateMax;
                 $lastUpdateSql = $newUpdateMax;
-                $lastHeartbeat = time();
             } else {
-                // Filter matched nothing; jump past the global max so we don't loop
+                // Filter matched nothing — jump past the global max so we don't loop
                 $lastCreateSql = $maxCreate;
                 if (strcmp($maxUpdate, SQL_SENTINEL) > 0) {
                     $lastUpdateSql = $maxUpdate;
